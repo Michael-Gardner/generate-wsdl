@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+
+import argparse
+from re import X
+import subprocess
+import os, shutil
+from sre_compile import isstring
+import logging
+from tokenize import String
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    parser.add_argument("-b","--branch", default="master",
+        help='''
+            Branch to target for wsdl generation
+            default: master
+            example: hpcc4j-8.8.X
+            '''
+    )
+    parser.add_argument("-u","--user", default="hpcc-systems",
+        help='''
+            User for repository fetch
+            default: hpcc-systems
+            example: mygithubusername
+            '''
+    )
+    parser.add_argument("-v","--verbose", action="store_true",
+        help="Give more verbose information"
+    )
+    parser.add_argument("-d","--debug", action="store_true",
+        help="Ouput debugging information"
+    )
+    
+    args = parser.parse_args()
+
+    # list of repositories
+    repositories = ['HPCC-Platform', 'hpcc4j']
+
+    # list of service to ecm file tuples
+    services = [("wsattributes", None),
+                ("wscodesign", "ws_codesign.ecm"),
+                ("wsdfu", "ws_dfu.ecm"),
+                ("wsdfuxref", "ws_dfuXref.ecm"),
+                ("wsfileio", "ws_fileio.ecm"),
+                ("wsfilespray", "ws_fs.ecm"),
+                ("wspackageprocess", "ws_packageprocess.ecm"),
+                ("wsresources", "ws_resources.ecm"),
+                ("wssmc", "ws_smc.ecm"),
+                ("wssql", "ws_sql.ecm"),
+                ("wsstore", "ws_store.ecm"),
+                ("wstopology", "ws_topology.ecm"),
+                ("wsworkunits", "ws_workunits.ecm"),
+                ("wsdali", "ws_dali.ecm"),
+    ]
+    
+
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO)
+    elif args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+
+    for i in repositories:
+        if args.user != "hpcc-systems":
+            shutil.rmtree(i)
+        if os.path.isdir(i):
+            checkout_branch(i, args.branch)
+        else:
+            fetch_repository(i, args.user, args.branch,)
+
+    for service_name, ecm_file in services:
+        if ecm_file == None:
+            continue
+        version = request_wsdl_version(service_name, ecm_file)
+        logging.info("-----------------------------")
+        logging.info(f"service : {service_name}")
+        logging.info(f"version : {version}")
+        wsdl_files = get_wsdl_files(service_name)
+        logging.info(f"wsdl files : {wsdl_files}")
+    
+
+def get_wsdl_files(service):
+    wsdl_location = f"{os.getcwd()}/hpcc4j/wsclient/src/main/resources/WSDLs"
+    logging.debug(f"finding matching wsdl files at {wsdl_location}")
+    files = os.listdir(wsdl_location)
+    logging.debug(f"wsdl files found : {files}")
+    wsdl_files = []
+    for file in files:
+        if str(service).capitalize() in file.capitalize():
+            wsdl_files.append(file)
+    logging.debug(f"found matching wsdl files for service {service} : {wsdl_files}")
+    return wsdl_files
+
+# service is a tuple of service name to ecm file
+def get_ecm_filepath(ecm_file):
+    if isinstance(ecm_file, str):
+        ecm_filpath=f"{os.getcwd()}/HPCC-Platform/esp/scm/{ecm_file}"
+        logging.debug(f"will test {ecm_filpath}")
+        if os.path.isfile(ecm_filpath):
+            return ecm_filpath
+        else:
+            raise OSError(f"File not found at {ecm_filpath}")
+    return None
+
+def request_wsdl_version(service, ecm_file):
+    version_output = open('tmpversion.txt', 'w')
+    logging.debug(f"service : {service}")
+    logging.debug(f"ecmfile : {ecm_file}")
+    ecmfilepath = get_ecm_filepath(ecm_file)
+    fetch_version_command = f"esdl wsdl {ecmfilepath} {service}"
+    # awk 'BEGIN {{ FS = \":\" }} ; /Target interface version set to latest from ECM definition/ {{ print $2 }}'"
+    logging.debug(f"Running command : {fetch_version_command}")
+    subprocess.run(fetch_version_command.split(), timeout=120, stderr=version_output, stdout=subprocess.DEVNULL)
+    version_output.close()
+    with open('tmpversion.txt', 'r') as f:
+        for line in f:
+            if line.startswith('Target interface version set to latest from ECM definition:'):
+                version = line.replace('Target interface version set to latest from ECM definition', '').replace(':','').replace('\'','').strip()
+                logging.debug(f"process output : {version}")
+                return version
+    return None
+
+def fetch_repository(repository, user, branch, recursive=False):
+    try:
+        fetch_repository_command = f"git clone -b {branch} https://github.com/{user}/{repository}.git"
+        if recursive:
+            fetch_repository_command = f"{fetch_repository_command} --recursive"
+        process = subprocess.run(fetch_repository_command.split(), timeout=600, stderr=subprocess.STDOUT)
+        logging.debug(process.stdout)
+    except Exception as e:
+        logging.error(f"Error in fetch_repository({repository}, {user}, {branch}, {recursive}) : {e.strerror}")
+
+def checkout_branch(repository, branch):
+    try:
+        working_dir = f"{os.getcwd()}/{repository}"
+        logging.debug(f"working directory is {working_dir}")
+        process = subprocess.run(['git','fetch'], timeout=600, cwd=working_dir, stderr=subprocess.STDOUT)
+        logging.debug(process.stdout)
+        checkout_branch_command = f"git checkout {branch}"
+        process = subprocess.run(checkout_branch_command.split(), timeout=600, cwd=working_dir, stderr=subprocess.STDOUT)
+        logging.debug(process.stdout)
+        update_to_current_head_command = f"git reset --hard origin/{branch}"
+        subprocess.run(update_to_current_head_command.split(), timeout=600, cwd=working_dir, stderr=subprocess.STDOUT)
+        logging.debug(process.stdout)
+    except Exception as e:
+        logging.error(f"Error in checkout_branch({repository}, {branch}) : {e.strerror}")
+    
+
+if __name__ == '__main__':
+    main()
