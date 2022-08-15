@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
-from re import X
+from operator import ge
+from re import X, sub
 import subprocess
 import os, shutil
 from sre_compile import isstring
@@ -14,6 +15,13 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
 
+    parser.add_argument("-s","--service", default="all",
+        help='''
+            Service to target for wsdl generation
+            default: all
+            example: wsdfu
+            '''
+    )
     parser.add_argument("-b","--branch", default="master",
         help='''
             Branch to target for wsdl generation
@@ -34,6 +42,9 @@ def main():
     parser.add_argument("-d","--debug", action="store_true",
         help="Ouput debugging information"
     )
+    parser.add_argument("-l","--list-services", action="store_true",
+        help="List available services for stubcode generation"
+    )
     
     args = parser.parse_args()
 
@@ -41,20 +52,23 @@ def main():
     repositories = ['HPCC-Platform', 'hpcc4j']
 
     # list of service to ecm file tuples
-    services = [("wsattributes", None),
-                ("wscodesign", "ws_codesign.ecm"),
-                ("wsdfu", "ws_dfu.ecm"),
-                ("wsdfuxref", "ws_dfuXref.ecm"),
-                ("wsfileio", "ws_fileio.ecm"),
-                ("wsfilespray", "ws_fs.ecm"),
-                ("wspackageprocess", "ws_packageprocess.ecm"),
-                ("wsresources", "ws_resources.ecm"),
-                ("wssmc", "ws_smc.ecm"),
-                ("wssql", "ws_sql.ecm"),
-                ("wsstore", "ws_store.ecm"),
-                ("wstopology", "ws_topology.ecm"),
-                ("wsworkunits", "ws_workunits.ecm"),
-                ("wsdali", "ws_dali.ecm"),
+    # 1) general service name
+    # 2) emc file name
+    # 3) wsdl file prefix
+    services = [("wsattributes", None, "WsAttributes"),
+                ("wscodesign", "ws_codesign.ecm", "WsCodeSign"),
+                ("wsdfu", "ws_dfu.ecm", "WsDFU"),
+                ("wsdfuxref", "ws_dfuXref.ecm", "WsDFUXRef"),
+                ("wsfileio", "ws_fileio.ecm", "WsFileIO"),
+                ("wsfilespray", "ws_fs.ecm", "WsFileSpray"),
+                ("wspackageprocess", "ws_packageprocess.ecm", "WsPackageProcess"),
+                ("wsresources", "ws_resources.ecm", "WsResources"),
+                ("wssmc", "ws_smc.ecm", "WsSMC"),
+                ("wssql", "ws_sql.ecm", "WsSQL"),
+                ("wsstore", "ws_store.ecm", "WsStore"),
+                ("wstopology", "ws_topology.ecm", "WsTopology"),
+                ("wsworkunits", "ws_workunits.ecm", "WsWorkunits"),
+                ("wsdali", "ws_dali.ecm", "WsDali"),
     ]
     
 
@@ -62,6 +76,12 @@ def main():
         logging.basicConfig(level=logging.INFO)
     elif args.debug:
         logging.basicConfig(level=logging.DEBUG)
+
+    if args.list_services:
+        print("The following services are available for stubcode generation:")
+        for service_name, b, c in services:
+            print(f"{service_name}")
+        return
 
     for i in repositories:
         if args.user != "hpcc-systems":
@@ -71,16 +91,95 @@ def main():
         else:
             fetch_repository(i, args.user, args.branch,)
 
-    for service_name, ecm_file in services:
+    generate_commons_dependency()
+
+    for service_name, ecm_file, wsdl_prefix in services: 
+        if args.service != "all" and service_name != args.service:
+            continue
         if ecm_file == None:
             continue
         version = request_wsdl_version(service_name, ecm_file)
         logging.info("-----------------------------")
         logging.info(f"service : {service_name}")
         logging.info(f"version : {version}")
-        wsdl_files = get_wsdl_files(service_name)
+        logging.info(f"wsdl : {wsdl_prefix}.wsdl ")
+        wsdl_files = get_wsdl_files(wsdl_prefix)
         logging.info(f"wsdl files : {wsdl_files}")
+        wsdl_found = False
+        version_stripped = str(version).replace('.','')
+        logging.info(f"Version stripped = {version_stripped}")
+        if version == None:
+            logging.warning(f"Version for {service_name} is None, skipping generation")
+            continue
+        for file in wsdl_files:
+            if version_stripped in file:
+                wsdl_found = True
+        if not wsdl_found:
+            #generate wsdl & new stubcode
+            generate_wsdl(service_name, ecm_file, wsdl_prefix, version)
+            remove_latest(service_name)
+            generate_stubcode(service_name)
+
+    # cleanup environment
+    if os.path.exists('tmpversion.txt'):
+        os.remove('tmpversion.txt')
+
+
+# end main()
+################################################################################
+# helper functions
+################################################################################
+
+def remove_latest(service):
+    cwd = os.getcwd()
+    latest_path = f"{cwd}/hpcc4j/wsclient/src/main/java/org/hpccsystems/ws/client/gen/axis2/{service}/latest"
+    if os.path.exists(latest_path):
+        shutil.rmtree(latest_path)
+    else:
+        logging.warning(f"could not locate for removal: {latest_path}")
+
+def generate_wsdl(service, ecm, wsdl_pre, ver):
+    # check ecm file exists
+    full_ecm_file_path = f"{os.getcwd()}/HPCC-Platform/esp/scm/{ecm}"
+    if not os.path.exists(full_ecm_file_path):
+        logging.error(f"no file found at : {full_ecm_file_path}")
+        exit()
+    wsdl_output_path = f"{os.getcwd()}/hpcc4j/wsclient/src/main/resources/WSDLs"
+    # rename old file
+    simple_version = str(ver).replace('.','')
+    src = f"{wsdl_output_path}/{wsdl_pre}.wsdl"
+    dest = f"{wsdl_output_path}/{wsdl_pre}-{simple_version}.wsdl"
+    if os.path.exists(src):
+        os.rename(src, dest)
+    generate_wsdl_command = f"esdl wsdl {full_ecm_file_path} {service} -iv {ver} --outdir {wsdl_output_path} --unversioned-ns"
+    logging.debug(f"generate_wsdl_command = {generate_wsdl_command}")
+    process = subprocess.run(generate_wsdl_command.split(), timeout=120)
+    if os.path.exists(f"{wsdl_output_path}/{service}.wsdl"):
+        os.rename(f"{wsdl_output_path}/{service}.wsdl", f"{wsdl_output_path}/{wsdl_pre}.wsdl")
+    else:
+        logging.error("no wsdl generated")
+    logging.debug(f"generate_wsdl({service}, {ecm}, {ver}) output to {wsdl_output_path}")
+    with open(f"{wsdl_output_path}/{wsdl_pre}.wsdl", "r") as f:
+        for line in f:
+            logging.debug(line)
     
+def generate_commons_dependency():
+    generate_commons_dependency_command = f"mvn clean install"
+    working_directory = f"{os.getcwd()}/hpcc4j/commons-hpcc"
+    logging.debug(f"generate_commons_dependency_command = {generate_commons_dependency_command}")
+    process = subprocess.Popen(generate_commons_dependency_command.split(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=working_directory)
+    for line in process.stdout:
+        logging.info(str(line, 'utf-8'))
+
+def generate_stubcode(service):
+    wsdl_output_path = f"{os.getcwd()}/hpcc4j/wsclient/src/main/resources/WSDLs"
+    generate_stubcode_command = f"mvn -Pgenerate-{service}-stub process-resources"
+    logging.debug(f"generate_stubcode_command = {generate_stubcode_command}")
+    working_directory = f"{os.getcwd()}/hpcc4j/wsclient"
+    process = subprocess.Popen(generate_stubcode_command.split(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=working_directory)
+    for line in process.stdout:
+        logging.info(str(line, 'utf-8'))
+
 
 def get_wsdl_files(service):
     wsdl_location = f"{os.getcwd()}/hpcc4j/wsclient/src/main/resources/WSDLs"
@@ -89,7 +188,7 @@ def get_wsdl_files(service):
     logging.debug(f"wsdl files found : {files}")
     wsdl_files = []
     for file in files:
-        if str(service).capitalize() in file.capitalize():
+        if service in file:
             wsdl_files.append(file)
     logging.debug(f"found matching wsdl files for service {service} : {wsdl_files}")
     return wsdl_files
@@ -111,7 +210,6 @@ def request_wsdl_version(service, ecm_file):
     logging.debug(f"ecmfile : {ecm_file}")
     ecmfilepath = get_ecm_filepath(ecm_file)
     fetch_version_command = f"esdl wsdl {ecmfilepath} {service}"
-    # awk 'BEGIN {{ FS = \":\" }} ; /Target interface version set to latest from ECM definition/ {{ print $2 }}'"
     logging.debug(f"Running command : {fetch_version_command}")
     subprocess.run(fetch_version_command.split(), timeout=120, stderr=version_output, stdout=subprocess.DEVNULL)
     version_output.close()

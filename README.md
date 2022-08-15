@@ -8,3 +8,10 @@ for example: esdl wsdl /hpcc-dev/HPCC-Platform/esp/scm/ws_store.ecm wsstore > /w
 Generate updated Axis2 based stub code via MVN "generate-wsclient-stub" profile
 Generate new wrapper code based on newly updated stub code via Axis2ADBStubWrapperMaker.java
 for example: Axis2ADBStubWrapperMaker servicename=wsstore targetpackage=org.hpccsystems.ws.client.gen.axis2.wsstore.latest outputdir=C:\assignments\GIT\hpcc4j\wsclient\src\main\java outputpackage=org.hpccsystems.ws.client.wrappers.gen
+
+
+wsdl output
+
+no version = latest, 
+if writing out, move latest to versioned and overwrite latest
+
